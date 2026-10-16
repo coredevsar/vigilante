@@ -1,0 +1,60 @@
+# Vigilante de Core Devs: prueba Monitor, Dokploy y los sitios cada 5 minutos DESDE AFUERA del servidor.
+# Existe porque Monitor vive en el mismo servidor que vigila: el 16/10/2026 Hostinger apagó la VPS y nadie
+# avisó, porque el que avisa se cayó con todo lo demás. Si algo falla, el job falla y GitHub manda el mail
+# y la notificación de la app a la cuenta coredevsar.
+#
+# Las direcciones viven en el secreto SITIOS (este repo es público para que los minutos de Actions no
+# cuesten): una por línea, "nombre|url|bytes mínimos". El nombre es lo único que se ve en los registros.
+name: Vigilante
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vigilante
+  cancel-in-progress: false
+
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Probar cada sitio (dos intentos antes de darlo por caído)
+        env:
+          SITIOS: ${{ secrets.SITIOS }}
+        run: |
+          fallas=0; total=0
+          while IFS='|' read -r nombre url minimo; do
+            [ -z "$url" ] && continue
+            total=$((total+1)); minimo=${minimo:-200}; ok=0
+            for intento in 1 2; do
+              code=$(curl -s -o /tmp/body -m 15 -L --max-redirs 5 -w '%{http_code}' "$url" || true)
+              size=$(wc -c < /tmp/body 2>/dev/null || echo 0)
+              if [ "$code" = "200" ] && [ "$size" -ge "$minimo" ]; then ok=1; break; fi
+              sleep 10
+            done
+            if [ "$ok" = 1 ]; then echo "OK      $nombre"; else echo "::error::CAÍDO  $nombre (HTTP ${code:-sin respuesta}, $size bytes)"; fallas=$((fallas+1)); fi
+          done <<< "$SITIOS"
+          if [ "$total" -eq 0 ]; then echo "::error::El secreto SITIOS está vacío"; exit 1; fi
+          echo "$fallas de $total con problemas"
+          [ "$fallas" -eq 0 ]
+
+      - uses: actions/checkout@v4
+        if: always()
+
+      - name: Mantener activo el cronograma
+        if: always()
+        # GitHub apaga los cronogramas de un repo sin commits en 60 días: cada 45, un commit vacío.
+        run: |
+          ultimo=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - ultimo )) -gt $((45*86400)) ]; then
+            git config user.name "vigilante"
+            git config user.email "vigilante@users.noreply.github.com"
+            git commit --allow-empty -m "Mantener activo el vigilante"
+            git push
+          fi
